@@ -9,31 +9,58 @@ const config = require('./config/env');
 const connectDB = require('./config/database');
 const errorHandler = require('./middleware/errorHandler');
 
-// Importar GraphQL solo si no estamos en entorno de test
-let graphqlSetup = Promise.resolve();
-
-if (process.env.NODE_ENV !== 'test') {
-  const graphqlSchema = require('./graphql/schema');
-  const graphqlResolvers = require('./graphql/resolvers');
+// *** CONFIGURACIÓN MEJORADA DE CORS ***
+const getCorsOrigins = () => {
+  if (process.env.NODE_ENV === 'development') {
+    return [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://localhost:5173', // Vite
+      'https://main.d16u29sl50u6h.amplifyapp.com',
+      'https://studio.apollographql.com'
+    ];
+  }
   
-  graphqlSetup = (async () => {
-    const apolloServer = new ApolloServer({
-      typeDefs: graphqlSchema,
-      resolvers: graphqlResolvers,
-      context: ({ req }) => ({ req }),
-      formatError: (error) => {
-        console.error('GraphQL Error:', error);
-        return {
-          message: error.message,
-          code: error.extensions?.code || 'INTERNAL_ERROR',
-        };
-      },
-    });
+  if (process.env.NODE_ENV === 'production') {
+    return [
+      'https://main.d16u29sl50u6h.amplifyapp.com',
+      'https://studio.apollographql.com'
+    ];
+  }
+  
+  return ['http://localhost:3000'];
+};
 
-    await apolloServer.start();
-    return apolloServer;
-  })();
-}
+// Configuración CORS mejorada para manejar preflight
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Permitir requests sin origin (como mobile apps, postman, etc.)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = getCorsOrigins();
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log(`🚫 CORS bloqueado para origen: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers'
+  ],
+  exposedHeaders: ['Authorization'],
+  preflightContinue: false,
+  optionsSuccessStatus: 204
+};
 
 // Route imports
 const authRoutes = require('./routes/auth');
@@ -47,11 +74,20 @@ if (process.env.NODE_ENV !== 'test') {
   connectDB();
 }
 
-// Security middleware - CONFIGURADO PARA APOLLO STUDIO
+// *** MIDDLEWARE ORDER IS CRITICAL ***
+
+// 1. CORS debe ir PRIMERO
+app.use(cors(corsOptions));
+
+// 2. Manejar preflight OPTIONS requests explícitamente
+app.options('*', cors(corsOptions));
+
+// 3. Security middleware
 if (process.env.NODE_ENV === 'production') {
-  app.use(helmet());
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" }
+  }));
 } else {
-  // En desarrollo, configurar Helmet para permitir Apollo Studio
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -84,27 +120,34 @@ if (process.env.NODE_ENV === 'production') {
         },
       },
       crossOriginEmbedderPolicy: false,
+      crossOriginResourcePolicy: { policy: "cross-origin" }
     })
   );
 }
 
-// Rate limiting (solo en producción)
+// 4. Rate limiting
 if (process.env.NODE_ENV === 'production') {
   const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 100,
+    message: {
+      error: 'Too many requests from this IP, please try again later.'
+    }
   });
-  app.use(limiter);
+  app.use('/api/', limiter);
 }
 
-// CORS
-app.use(cors());
-
-// Body parsing middleware
+// 5. Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Routes
+// 6. Logging middleware para debug CORS
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin}`);
+  next();
+});
+
+// Routes (REST)
 app.use('/api/auth', authRoutes);
 app.use('/api/programs', programRoutes);
 app.use('/api/users', userRoutes);
@@ -114,36 +157,77 @@ app.get('/health', (req, res) => {
   res.json({ 
     success: true, 
     message: 'Server is running', 
-    timestamp: new Date().toISOString() 
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV
   });
 });
 
-// Aplicar GraphQL después de que el servidor esté listo
-if (process.env.NODE_ENV !== 'test') {
-  graphqlSetup.then(apolloServer => {
-    apolloServer.applyMiddleware({ app, path: '/graphql' });
+// Test CORS route
+app.get('/api/cors-test', (req, res) => {
+  res.json({ 
+    message: 'CORS is working!',
+    origin: req.headers.origin,
+    allowedOrigins: getCorsOrigins()
   });
-}
+});
 
-// Error handling middleware (should be last)
-app.use(errorHandler);
-
+// *** Apollo Server Setup ***
 const startServer = async () => {
   if (process.env.NODE_ENV !== 'test') {
+    let apolloServer;
+    
+    if (process.env.NODE_ENV !== 'test') {
+      const graphqlSchema = require('./graphql/schema');
+      const graphqlResolvers = require('./graphql/resolvers');
+
+      apolloServer = new ApolloServer({
+        typeDefs: graphqlSchema,
+        resolvers: graphqlResolvers,
+        context: ({ req }) => ({ req }),
+        formatError: (error) => {
+          console.error('GraphQL Error:', error);
+          return {
+            message: error.message,
+            code: error.extensions?.code || 'INTERNAL_ERROR',
+          };
+        },
+        // Habilitar introspection y playground en producción si es necesario
+        introspection: process.env.NODE_ENV !== 'production',
+        playground: process.env.NODE_ENV !== 'production',
+      });
+
+      await apolloServer.start();
+      
+      // Aplicar middleware de Apollo con CORS
+      apolloServer.applyMiddleware({ 
+        app, 
+        path: '/graphql',
+        cors: corsOptions // Apollo también usa CORS
+      });
+    }
+
+    // Error handling middleware (debe ir al final)
+    app.use(errorHandler);
+
     const server = app.listen(config.port, () => {
-      console.log(`Server running in ${config.env} mode on port ${config.port}`);
-      if (process.env.NODE_ENV !== 'test') {
-        console.log(`GraphQL endpoint: http://localhost:${config.port}/graphql`);
+      console.log(`🚀 Server running in ${config.env} mode on port ${config.port}`);
+      console.log(`🌐 Allowed CORS origins: ${getCorsOrigins().join(', ')}`);
+      console.log(`✅ Health check: http://localhost:${config.port}/health`);
+      console.log(`✅ CORS test: http://localhost:${config.port}/api/cors-test`);
+      if (apolloServer) {
+        console.log(`🔮 GraphQL endpoint: http://localhost:${config.port}${apolloServer.graphqlPath}`);
       }
     });
+    
     return server;
   }
+  
+  app.use(errorHandler);
   return app;
 };
 
-// For testing
 if (require.main === module) {
-  startServer();
+  startServer().catch(console.error);
 }
 
 module.exports = app;
