@@ -9,40 +9,27 @@ const config = require('./config/env');
 const connectDB = require('./config/database');
 const errorHandler = require('./middleware/errorHandler');
 
-// *** CONFIGURACIÓN MEJORADA DE CORS ***
-const getCorsOrigins = () => {
-  if (process.env.NODE_ENV === 'development') {
-    return [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://localhost:5173', // Vite
-      'https://main.d16u29sl50u6h.amplifyapp.com',
-      'https://studio.apollographql.com'
-    ];
-  }
-  
-  if (process.env.NODE_ENV === 'production') {
-    return [
-      'https://main.d16u29sl50u6h.amplifyapp.com',
-      'https://studio.apollographql.com'
-    ];
-  }
-  
-  return ['http://localhost:3000'];
-};
+// *** CONFIGURACIÓN CORS SIMPLIFICADA Y FUNCIONAL ***
+const allowedOrigins = [
+  'https://main.d16uz79ib5bvwh.amplifyapp.com',
+  'https://main.d16u29sl50u6h.amplifyapp.com', 
+  'https://studio.apollographql.com',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://localhost:5173'
+];
 
-// Configuración CORS mejorada para manejar preflight
 const corsOptions = {
   origin: function (origin, callback) {
-    // Permitir requests sin origin (como mobile apps, postman, etc.)
+    // Permitir requests sin origin (mobile apps, postman, etc.)
     if (!origin) return callback(null, true);
     
-    const allowedOrigins = getCorsOrigins();
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    if (allowedOrigins.includes(origin)) {
+      console.log(`✅ CORS permitido para: ${origin}`);
       callback(null, true);
     } else {
-      console.log(`🚫 CORS bloqueado para origen: ${origin}`);
+      console.log(`🚫 CORS bloqueado para: ${origin}`);
+      console.log(`📋 Dominios permitidos:`, allowedOrigins);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -59,7 +46,8 @@ const corsOptions = {
   ],
   exposedHeaders: ['Authorization'],
   preflightContinue: false,
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 204,
+  maxAge: 86400
 };
 
 // Route imports
@@ -74,12 +62,12 @@ if (process.env.NODE_ENV !== 'test') {
   connectDB();
 }
 
-// *** MIDDLEWARE ORDER IS CRITICAL ***
+// *** ORDEN CRÍTICO DE MIDDLEWARE ***
 
-// 1. CORS debe ir PRIMERO
+// 1. CORS debe ir PRIMERO - antes de cualquier otro middleware
 app.use(cors(corsOptions));
 
-// 2. Manejar preflight OPTIONS requests explícitamente
+// 2. Manejo EXPLÍCITO de preflight OPTIONS para TODAS las rutas
 app.options('*', cors(corsOptions));
 
 // 3. Security middleware
@@ -141,7 +129,7 @@ if (process.env.NODE_ENV === 'production') {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// 6. Logging middleware para debug CORS
+// 6. Logging middleware para debug
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin}`);
   next();
@@ -167,9 +155,14 @@ app.get('/api/cors-test', (req, res) => {
   res.json({ 
     message: 'CORS is working!',
     origin: req.headers.origin,
-    allowedOrigins: getCorsOrigins()
+    timestamp: new Date().toISOString()
   });
 });
+
+// Test OPTIONS específico
+app.options('/api/cors-test', cors(corsOptions));
+app.options('/api/auth/login', cors(corsOptions));
+app.options('/api/auth/*', cors(corsOptions));
 
 // *** Apollo Server Setup ***
 const startServer = async () => {
@@ -191,18 +184,17 @@ const startServer = async () => {
             code: error.extensions?.code || 'INTERNAL_ERROR',
           };
         },
-        // Habilitar introspection y playground en producción si es necesario
         introspection: process.env.NODE_ENV !== 'production',
         playground: process.env.NODE_ENV !== 'production',
+        cache: 'bounded'
       });
 
       await apolloServer.start();
       
-      // Aplicar middleware de Apollo con CORS
       apolloServer.applyMiddleware({ 
         app, 
         path: '/graphql',
-        cors: corsOptions // Apollo también usa CORS
+        cors: corsOptions
       });
     }
 
@@ -211,11 +203,11 @@ const startServer = async () => {
 
     const server = app.listen(config.port, () => {
       console.log(`🚀 Server running in ${config.env} mode on port ${config.port}`);
-      console.log(`🌐 Allowed CORS origins: ${getCorsOrigins().join(', ')}`);
-      console.log(`✅ Health check: http://localhost:${config.port}/health`);
-      console.log(`✅ CORS test: http://localhost:${config.port}/api/cors-test`);
+      console.log(`🌐 Allowed CORS origins: ${allowedOrigins.join(', ')}`);
+      console.log(`✅ Health check: https://node.alyneos.com/health`);
+      console.log(`✅ CORS test: https://node.alyneos.com/api/cors-test`);
       if (apolloServer) {
-        console.log(`🔮 GraphQL endpoint: http://localhost:${config.port}${apolloServer.graphqlPath}`);
+        console.log(`🔮 GraphQL endpoint: https://node.alyneos.com/graphql`);
       }
     });
     
